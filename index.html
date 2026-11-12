@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MarsSecret</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101525;color:#eef3ff;font:16px system-ui}
+header,main{max-width:1000px;margin:auto;padding:24px}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+header strong{margin-right:auto}
+h1{font-size:clamp(40px,8vw,76px);margin-bottom:10px}
+button,input,select,textarea{
+ font:inherit;padding:12px;border-radius:12px;
+ border:1px solid #52627f;background:#202c45;color:white
+}
+button{cursor:pointer}
+button:hover{background:#334568}
+input,textarea{max-width:100%}
+textarea{width:100%;min-height:90px}
+form{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+a{color:#a5e9d8}
+.panel{background:#19243b;padding:22px;border-radius:20px;margin:20px 0}
+.entry{padding:15px 0;border-bottom:1px solid #35445f}
+.entry button{margin-left:12px}
+.hero{text-align:center;padding:24px 0}
+.chat-button{width:78px;height:78px;border-radius:50%;background:#6751a9}
+dialog{
+ background:#19243b;color:white;border:1px solid #667795;
+ border-radius:20px;width:min(700px,94vw)
+}
+dialog::backdrop{background:#0009}
+#messages{height:340px;overflow:auto;white-space:pre-wrap}
+.message{padding:12px;border-bottom:1px solid #35445f}
+#status{color:#acebd9;white-space:pre-wrap}
+[hidden]{display:none!important}
+</style>
+
+<header>
+ <strong>MarsSecret</strong>
+ <span id="identity"></span>
+ <button id="account">Account</button>
+ <button id="logout" hidden>Log out</button>
+</header>
+
+<main>
+ <section class="hero">
+  <h1>MarsSecret</h1>
+  <p>A whole world of good stuff.</p>
+  <button id="openChat" class="chat-button">Chat</button>
+  <form id="searchForm">
+   <input id="search" placeholder="Search games and websites"
+          aria-label="Search">
+   <select id="category" aria-label="Category">
+    <option>All</option><option>Game</option><option>Website</option>
+   </select>
+  </form>
+ </section>
+ <p id="status" role="status"></p>
+ <section class="panel">
+  <h2>Announcements</h2><div id="announcements"></div>
+ </section>
+ <section class="panel">
+  <h2>Explore</h2><div id="listings"></div>
+ </section>
+ <section id="admin" class="panel" hidden>
+  <h2>Owner panel</h2>
+  <h3>Add a game or website</h3>
+  <form id="listingForm">
+   <input name="title" placeholder="Title" maxlength="100" required>
+   <input name="url" type="url" placeholder="https://…" required>
+   <select name="category"><option>Game</option><option>Website</option></select>
+   <button>Add</button>
+  </form>
+  <h3>Post an announcement</h3>
+  <form id="announcementForm">
+   <textarea name="body" maxlength="2000" required></textarea>
+   <button>Post announcement</button>
+  </form>
+ </section>
+</main>
+
+<dialog id="auth">
+ <button id="closeAuth">Close</button>
+ <h2>Your account</h2>
+ <form id="authForm">
+  <input name="email" type="email" placeholder="Email"
+         autocomplete="email" required>
+  <input name="password" type="password" placeholder="Password"
+         autocomplete="current-password" minlength="12" required>
+  <button value="login">Log in</button>
+  <button value="signup">Create account</button>
+ </form>
+ <p id="authStatus" role="status"></p>
+</dialog>
+
+<dialog id="chat">
+ <button id="closeChat">Close</button>
+ <h2>Community · #general</h2>
+ <div id="messages"></div>
+ <form id="messageForm">
+  <input name="body" placeholder="Message the community"
+         aria-label="Message" maxlength="1000" required>
+  <button>Send</button>
+ </form>
+ <p id="chatStatus" role="status">Log in to send messages.</p>
+</dialog>
+
+<script type="module">
+import {createClient} from 'https://esm.sh/@supabase/supabase-js@2';
+
+const URL='YOUR_SUPABASE_URL';
+const KEY='YOUR_PUBLIC_KEY';
+const $=id=>document.getElementById(id);
+let db,user=null,owner=false,items=[];
+
+function element(tag,text){
+ const e=document.createElement(tag);
+ e.textContent=text;
+ return e;
+}
+function report(error){
+ $('status').textContent=error.message||String(error);
+}
+function validURL(value){
+ const url=new window.URL(value);
+ if(!['https:','http:'].includes(url.protocol))
+  throw Error('Use an HTTP or HTTPS link.');
+ return url.href;
+}
+async function remove(table,id){
+ if(!confirm('Delete this item?')) return;
+ const {error}=await db.from(table).delete().eq('id',id);
+ if(error) return report(error);
+ await refresh();
+ await loadChat();
+}
+function deleteButton(table,id){
+ const b=element('button','Delete');
+ b.onclick=()=>remove(table,id);
+ return b;
+}
+function draw(){
+ $('listings').replaceChildren();
+ const query=$('search').value.toLowerCase();
+ for(const item of items){
+  if(!item.title.toLowerCase().includes(query)) continue;
+  if($('category').value!=='All' &&
+     item.category!==$('category').value) continue;
+  const row=element('div','');
+  row.className='entry';
+  const link=element('a',item.title+' · '+item.category);
+  try{link.href=validURL(item.url)}catch{continue}
+  row.append(link);
+  if(owner) row.append(deleteButton('listings',item.id));
+  $('listings').append(row);
+ }
+}
+async function refresh(){
+ const list=await db.from('listings').select('*').order('id');
+ if(list.error) throw list.error;
+ items=list.data;
+ draw();
+ const news=await db.from('announcements')
+  .select('*').order('id',{ascending:false});
+ if(news.error) throw news.error;
+ $('announcements').replaceChildren();
+ for(const item of news.data){
+  const row=element('p',item.body);
+  if(owner) row.append(deleteButton('announcements',item.id));
+  $('announcements').append(row);
+ }
+}
+async function session(){
+ const {data}=await db.auth.getUser();
+ user=data.user;
+ owner=false;
+ if(user){
+  const result=await db.from('owners')
+   .select('user_id').eq('user_id',user.id);
+  if(result.error) throw result.error;
+  owner=result.data.length>0;
+ }
+ $('identity').textContent=user?user.email:'';
+ $('logout').hidden=!user;
+ $('admin').hidden=!owner;
+ $('chatStatus').textContent=user?'Signed in.':'Log in to send messages.';
+ await refresh();
+}
+async function loadChat(){
+ const result=await db.from('messages')
+  .select('*').order('id',{ascending:false}).limit(100);
+ if(result.error) throw result.error;
+ const box=$('messages');
+ const bottom=box.scrollHeight-box.scrollTop-box.clientHeight<60;
+ box.replaceChildren();
+ for(const message of result.data.reverse()){
+  const label=message.user_id===user?.id?'You':
+   'Member '+message.user_id.slice(0,6);
+  const row=element('div',label+' · '+
+   new Date(message.created_at).toLocaleString()+'\n'+message.body);
+  row.className='message';
+  if(owner) row.append(deleteButton('messages',message.id));
+  box.append(row);
+ }
+ if(bottom) box.scrollTop=box.scrollHeight;
+}
+$('account').onclick=()=>$('auth').showModal();
+$('closeAuth').onclick=()=>$('auth').close();
+$('closeChat').onclick=()=>$('chat').close();
+$('openChat').onclick=async()=>{
+ $('chat').showModal();
+ if(db) try{await loadChat()}catch(e){report(e)}
+};
+$('searchForm').onsubmit=e=>e.preventDefault();
+$('search').oninput=draw;
+$('category').onchange=draw;
+
+$('authForm').onsubmit=async e=>{
+ e.preventDefault();
+ if(!db){
+  $('authStatus').textContent='Connect Supabase first.';
+  return;
+ }
+ const f=new FormData(e.target);
+ const credentials={email:f.get('email'),password:f.get('password')};
+ const signup=e.submitter.value==='signup';
+ const result=signup?await db.auth.signUp(credentials):
+  await db.auth.signInWithPassword(credentials);
+ if(result.error){
+  $('authStatus').textContent=result.error.message;
+  return;
+ }
+ $('authStatus').textContent=signup?
+  'Account created. Check your email for confirmation.':'Logged in.';
+ e.target.reset();
+ await session();
+ if(user) $('auth').close();
+};
+$('logout').onclick=async()=>{
+ const {error}=await db.auth.signOut();
+ if(error) return report(error);
+ await session();
+};
+$('listingForm').onsubmit=async e=>{
+ e.preventDefault();
+ try{
+  const f=new FormData(e.target);
+  const {error}=await db.from('listings').insert({
+   title:f.get('title'),url:validURL(f.get('url')),
+   category:f.get('category')
+  });
+  if(error) throw error;
+  e.target.reset();
+  await refresh();
+ }catch(error){report(error)}
+};
+$('announcementForm').onsubmit=async e=>{
+ e.preventDefault();
+ const {error}=await db.from('announcements').insert({
+  body:new FormData(e.target).get('body')
+ });
+ if(error) return report(error);
+ e.target.reset();
+ await refresh();
+};
+$('messageForm').onsubmit=async e=>{
+ e.preventDefault();
+ if(!user){
+  $('chatStatus').textContent='Log in first.';
+  return;
+ }
+ const body=new FormData(e.target).get('body').trim();
+ if(!body) return;
+ const {error}=await db.from('messages').insert({
+  user_id:user.id,body
+ });
+ if(error){
+  $('chatStatus').textContent=error.message;
+  return;
+ }
+ e.target.reset();
+ await loadChat();
+};
+
+if(URL.startsWith('https://')){
+ db=createClient(URL,KEY);
+ try{await session()}catch(error){report(error)}
+ db.auth.onAuthStateChange(()=>{
+  setTimeout(()=>session().catch(report),0);
+ });
+ setInterval(()=>{
+  if($('chat').open) loadChat().catch(report);
+ },3000);
+}else{
+ $('status').textContent='Connect Supabase to enable accounts and community features.';
+ items=[{
+  title:'Original MarsSecret Games',category:'Game',
+  url:'https://mellow-marzipan-857941.netlify.app/'
+ }];
+ draw();
+}
+</script>
+</html>
